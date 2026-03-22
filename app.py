@@ -21,14 +21,20 @@ SHEET_CSV_URL = (
     "/export?format=csv&gid=1143313092"
 )
 
+def _get_secret(key: str) -> str:
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.environ.get(key, "")
+
 def get_access_token() -> str:
-    return st.secrets.get("META_ACCESS_TOKEN", os.environ.get("META_ACCESS_TOKEN", ""))
+    return _get_secret("META_ACCESS_TOKEN")
 
 def get_app_id() -> str:
-    return st.secrets.get("META_APP_ID", os.environ.get("META_APP_ID", ""))
+    return _get_secret("META_APP_ID")
 
 def get_app_secret() -> str:
-    return st.secrets.get("META_APP_SECRET", os.environ.get("META_APP_SECRET", ""))
+    return _get_secret("META_APP_SECRET")
 
 def exchange_long_term_token(short_term_token: str) -> dict:
     """用短期 token 換取長期 token（60 天），回傳 {access_token, expires_in} 或 {error}"""
