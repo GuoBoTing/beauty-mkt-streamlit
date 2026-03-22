@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 # ── 設定 ──────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="美業前測問卷 廣告成效",
+    page_title="超老闆美業行銷課 Dashboard",
     page_icon="📊",
     layout="wide",
 )
@@ -143,7 +143,7 @@ def detect_date_column(df: pd.DataFrame):
 
 # ── 主畫面 ────────────────────────────────────────────────────────────────────
 
-st.title("美業前測問卷 廣告成效")
+st.title("超老闆美業行銷課 Dashboard")
 st.caption("數據每 5 分鐘自動更新 · 行銷活動：【勿動】超老闆前測問卷_柏廷")
 
 # 檢查 token
