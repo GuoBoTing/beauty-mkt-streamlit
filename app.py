@@ -17,8 +17,8 @@ CAMPAIGN_ID = "6939598565939"
 AD_ACCOUNT_ID = "act_111854365566947"
 SHEET_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/"
-    "13dS5ILsNtnO6ZNqTaBhPNyiXTmjcalk2ZOLC_EjUtoU"
-    "/export?format=csv&gid=1143313092"
+    "1evy1dsWqotGtOjB7JHCuppi3pfy1oISoOjHeJnWfQ5o"
+    "/export?format=csv&gid=2114940393"
 )
 
 def _get_secret(key: str) -> str:
