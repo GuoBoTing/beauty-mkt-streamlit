@@ -20,6 +20,11 @@ SHEET_CSV_URL = (
     "1evy1dsWqotGtOjB7JHCuppi3pfy1oISoOjHeJnWfQ5o"
     "/export?format=csv&gid=2114940393"
 )
+SHEET_CSV_URL_2 = (
+    "https://docs.google.com/spreadsheets/d/"
+    "13dS5ILsNtnO6ZNqTaBhPNyiXTmjcalk2ZOLC_EjUtoU"
+    "/export?format=csv&gid=1143313092"
+)
 
 def _get_secret(key: str) -> str:
     try:
@@ -100,17 +105,24 @@ def fetch_meta_insights(start_date: str, end_date: str) -> pd.DataFrame:
     return df[["date", "spend", "clicks", "impressions", "cpc"]].sort_values("date")
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_sheet_data() -> pd.DataFrame:
+def _fetch_csv(url: str, label: str) -> pd.DataFrame:
     try:
         import io
-        resp = requests.get(SHEET_CSV_URL, verify=False, timeout=15)
+        resp = requests.get(url, verify=False, timeout=15)
         resp.raise_for_status()
-        df = pd.read_csv(io.BytesIO(resp.content), encoding="utf-8-sig")
-        return df
+        return pd.read_csv(io.BytesIO(resp.content), encoding="utf-8-sig")
     except Exception as e:
-        st.warning(f"無法讀取 Google Sheet：{e}")
+        st.warning(f"無法讀取 Google Sheet（{label}）：{e}")
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_sheet_data() -> pd.DataFrame:
+    df1 = _fetch_csv(SHEET_CSV_URL, "第二波")
+    df2 = _fetch_csv(SHEET_CSV_URL_2, "第一波")
+    if df1.empty and df2.empty:
+        return pd.DataFrame()
+    return pd.concat([df1, df2], ignore_index=True)
 
 
 # ── 工具函式 ──────────────────────────────────────────────────────────────────
