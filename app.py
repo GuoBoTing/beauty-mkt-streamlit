@@ -7,30 +7,32 @@ from datetime import date, datetime, timedelta
 
 # ── 設定 ──────────────────────────────────────────────────────────────────────
 
-st.set_page_config(
-    page_title="超老闆美業行銷課前測數據儀表板",
-    page_icon="📊",
-    layout="wide",
-)
-
-CAMPAIGN_ID = "6939598565939"
-AD_ACCOUNT_ID = "act_111854365566947"
-SHEET_CSV_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "1evy1dsWqotGtOjB7JHCuppi3pfy1oISoOjHeJnWfQ5o"
-    "/export?format=csv&gid=2114940393"
-)
-SHEET_CSV_URL_2 = (
-    "https://docs.google.com/spreadsheets/d/"
-    "13dS5ILsNtnO6ZNqTaBhPNyiXTmjcalk2ZOLC_EjUtoU"
-    "/export?format=csv&gid=1143313092"
-)
-
-def _get_secret(key: str) -> str:
+def _get_secret(key: str, default: str = "") -> str:
     try:
         return st.secrets[key]
     except Exception:
-        return os.environ.get(key, "")
+        return os.environ.get(key, default)
+
+# ── 專案參數（所有欄位皆可透過 env var / secrets.toml 覆寫）──────────────────
+
+CAMPAIGN_ID    = _get_secret("CAMPAIGN_ID",    "6939598565939")
+AD_ACCOUNT_ID  = _get_secret("AD_ACCOUNT_ID",  "act_111854365566947")
+PAGE_TITLE     = _get_secret("PAGE_TITLE",     "超老闆美業行銷課前測數據儀表板")
+CAMPAIGN_LABEL = _get_secret("CAMPAIGN_LABEL", "【勿動】超老闆前測問卷_柏廷")
+
+# SHEET_CSV_URLS：逗號分隔的多個 Google Sheet CSV export URL
+_raw_urls = _get_secret(
+    "SHEET_CSV_URLS",
+    "https://docs.google.com/spreadsheets/d/1evy1dsWqotGtOjB7JHCuppi3pfy1oISoOjHeJnWfQ5o/export?format=csv&gid=2114940393,"
+    "https://docs.google.com/spreadsheets/d/13dS5ILsNtnO6ZNqTaBhPNyiXTmjcalk2ZOLC_EjUtoU/export?format=csv&gid=1143313092"
+)
+SHEET_CSV_URLS = [u.strip() for u in _raw_urls.split(",") if u.strip()]
+
+st.set_page_config(
+    page_title=PAGE_TITLE,
+    page_icon="📊",
+    layout="wide",
+)
 
 def get_access_token() -> str:
     return _get_secret("META_ACCESS_TOKEN")
@@ -118,11 +120,14 @@ def _fetch_csv(url: str, label: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_sheet_data() -> pd.DataFrame:
-    df1 = _fetch_csv(SHEET_CSV_URL, "第二波")
-    df2 = _fetch_csv(SHEET_CSV_URL_2, "第一波")
-    if df1.empty and df2.empty:
+    frames = []
+    for i, url in enumerate(SHEET_CSV_URLS, 1):
+        df = _fetch_csv(url, f"第 {i} 份")
+        if not df.empty:
+            frames.append(df)
+    if not frames:
         return pd.DataFrame()
-    return pd.concat([df1, df2], ignore_index=True)
+    return pd.concat(frames, ignore_index=True)
 
 
 # ── 工具函式 ──────────────────────────────────────────────────────────────────
@@ -155,8 +160,8 @@ def detect_date_column(df: pd.DataFrame):
 
 # ── 主畫面 ────────────────────────────────────────────────────────────────────
 
-st.title("超老闆美業行銷課前測數據儀表板")
-st.caption("數據每 5 分鐘自動更新 · 行銷活動：【勿動】超老闆前測問卷_柏廷")
+st.title(PAGE_TITLE)
+st.caption(f"數據每 5 分鐘自動更新 · 行銷活動：{CAMPAIGN_LABEL}")
 
 # 檢查 token
 if not get_access_token():
