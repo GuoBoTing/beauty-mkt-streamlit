@@ -328,19 +328,20 @@ with st.sidebar:
 
     # 先抓全期 Meta 資料以取得可用日期範圍
     earliest = date.today() - timedelta(days=37 * 30)
-    yesterday = date.today() - timedelta(days=1)
+    today = date.today()
+    yesterday = today - timedelta(days=1)
     with st.spinner("載入日期範圍..."):
-        full_df = fetch_meta_insights(earliest.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d"))
+        full_df = fetch_meta_insights(earliest.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
 
-    # 銷售期日期範圍：從 sales_start 到昨天
-    sales_min = max(sales_start, full_df["date"].min().date()) if not full_df.empty else sales_start
-    sales_max = yesterday if yesterday >= sales_start else sales_start
+    # 銷售期日期範圍：可選任何日期（含今天），預設從 sales_start 到今天
+    sales_min_pickable = full_df["date"].min().date() if not full_df.empty else (sales_start - timedelta(days=30))
+    sales_default_start = max(sales_start, sales_min_pickable) if sales_start <= today else sales_min_pickable
 
     date_range = st.date_input(
         "銷售期日期範圍",
-        value=(sales_min, sales_max),
-        min_value=sales_start,
-        max_value=sales_max,
+        value=(sales_default_start, today),
+        min_value=sales_min_pickable,
+        max_value=today,
     )
 
     if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
@@ -355,7 +356,7 @@ with st.sidebar:
 
 # ── 銷售期數據 ────────────────────────────────────────────────────────────────
 
-st.header(f"📈 銷售期數據（{SALES_START_DATE} 起）")
+st.header("📈 銷售期數據")
 
 start_str = start.strftime("%Y-%m-%d")
 end_str   = end.strftime("%Y-%m-%d")
