@@ -125,6 +125,73 @@ def fetch_meta_insights(start_date: str, end_date: str, campaign_id: str = "") -
     return df[["date", "spend", "clicks", "impressions", "cpc"]].sort_values("date")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_meta_ad_insights(start_date: str, end_date: str, campaign_id: str = "") -> pd.DataFrame:
+    """以 ad-level 抓素材成效（廣告組合、廣告、CTR、CPC、CPM、轉換等）。"""
+    token = get_access_token()
+    if not token:
+        return pd.DataFrame()
+
+    cid = campaign_id or CAMPAIGN_ID
+    url = f"https://graph.facebook.com/v19.0/{cid}/insights"
+    params = {
+        "level": "ad",
+        "fields": "ad_id,ad_name,adset_id,adset_name,spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions,cost_per_action_type",
+        "time_range": f'{{"since":"{start_date}","until":"{end_date}"}}',
+        "limit": 500,
+        "access_token": token,
+    }
+    rows = []
+    while url:
+        resp = requests.get(url, params=params if rows == [] else None)
+        data = resp.json()
+        if "error" in data:
+            st.error(f"Meta API 錯誤（素材成效）：{data['error'].get('message', data['error'])}")
+            break
+        rows.extend(data.get("data", []))
+        url = data.get("paging", {}).get("next")
+        params = None
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    for col in ["spend", "ctr", "cpc", "cpm", "frequency"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    for col in ["impressions", "clicks", "reach"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
+    # 從 actions 中萃取「購買」轉換數與「加入購物車」（依需要可擴充）
+    def _extract_action(actions, target_types):
+        if not isinstance(actions, list):
+            return 0
+        return sum(int(float(a.get("value", 0))) for a in actions if a.get("action_type") in target_types)
+
+    purchase_types = ["purchase", "offsite_conversion.fb_pixel_purchase",
+                      "omni_purchase", "onsite_web_purchase"]
+    lead_types     = ["lead", "offsite_conversion.fb_pixel_lead",
+                      "onsite_conversion.lead_grouped"]
+    landing_types  = ["landing_page_view"]
+
+    df["purchases"]      = df.get("actions", pd.Series([None] * len(df))).apply(lambda a: _extract_action(a, purchase_types))
+    df["leads_action"]   = df.get("actions", pd.Series([None] * len(df))).apply(lambda a: _extract_action(a, lead_types))
+    df["lp_views"]       = df.get("actions", pd.Series([None] * len(df))).apply(lambda a: _extract_action(a, landing_types))
+
+    # 計算 CPA（每筆轉換成本）— 優先用購買數，沒有就用名單數
+    def _cpa(row):
+        n = row["purchases"] if row["purchases"] > 0 else row["leads_action"]
+        return row["spend"] / n if n > 0 else None
+    df["cpa"] = df.apply(_cpa, axis=1)
+
+    cols_keep = ["ad_id", "ad_name", "adset_id", "adset_name", "spend",
+                 "impressions", "clicks", "ctr", "cpc", "cpm", "reach", "frequency",
+                 "purchases", "leads_action", "lp_views", "cpa"]
+    cols_keep = [c for c in cols_keep if c in df.columns]
+    return df[cols_keep].sort_values("spend", ascending=False)
+
+
 # ── Google Sheet（前測期名單）────────────────────────────────────────────────
 
 def _fetch_csv(url: str, label: str) -> pd.DataFrame:
@@ -574,6 +641,120 @@ if not meta_df.empty:
 else:
     st.info("所選日期範圍內無廣告數據")
 
+# ── 素材成效（密碼鎖）──────────────────────────────────────────────────────────
+
+CREATIVE_PASSWORD = "wecan90202317"
+
+st.divider()
+st.subheader("🎨 素材成效（需密碼）")
+
+if "creative_unlocked" not in st.session_state:
+    st.session_state["creative_unlocked"] = False
+
+if not st.session_state["creative_unlocked"]:
+    with st.form("creative_pw_form", clear_on_submit=False):
+        pw = st.text_input("請輸入密碼以查看素材成效", type="password", label_visibility="collapsed", placeholder="密碼")
+        submitted = st.form_submit_button("解鎖")
+        if submitted:
+            if pw == CREATIVE_PASSWORD:
+                st.session_state["creative_unlocked"] = True
+                st.rerun()
+            else:
+                st.error("密碼錯誤")
+else:
+    col_a, col_b = st.columns([1, 6])
+    with col_a:
+        if st.button("🔒 鎖定"):
+            st.session_state["creative_unlocked"] = False
+            st.rerun()
+
+    with st.spinner("載入素材成效..."):
+        ad_df = fetch_meta_ad_insights(start_str, end_str)
+
+    if ad_df.empty:
+        st.info("所選日期範圍內無素材數據")
+    else:
+        def _safe_apply(df, col, fn):
+            if col in df.columns:
+                df[col] = df[col].apply(fn)
+
+        # 廣告組合彙總
+        st.markdown("**廣告組合（Ad Set）彙總**")
+        if "adset_name" in ad_df.columns:
+            agg_dict = {
+                "spend": ("spend", "sum"),
+                "impressions": ("impressions", "sum"),
+                "clicks": ("clicks", "sum"),
+                "purchases": ("purchases", "sum"),
+                "leads": ("leads_action", "sum"),
+                "lp_views": ("lp_views", "sum"),
+            }
+            if "reach" in ad_df.columns:
+                agg_dict["reach"] = ("reach", "sum")
+            adset_agg = ad_df.groupby(["adset_id", "adset_name"], as_index=False).agg(**agg_dict)
+
+            adset_agg["ctr"] = adset_agg.apply(
+                lambda r: (r["clicks"] / r["impressions"] * 100) if r["impressions"] > 0 else 0, axis=1
+            )
+            adset_agg["cpc"] = adset_agg.apply(
+                lambda r: r["spend"] / r["clicks"] if r["clicks"] > 0 else None, axis=1
+            )
+            adset_agg["cpa"] = adset_agg.apply(
+                lambda r: r["spend"] / (r["purchases"] if r["purchases"] > 0 else r["leads"])
+                          if (r["purchases"] > 0 or r["leads"] > 0) else None,
+                axis=1,
+            )
+
+            adset_disp = adset_agg.copy()
+            _safe_apply(adset_disp, "spend",       lambda v: f"NT$ {v:,.0f}")
+            _safe_apply(adset_disp, "impressions", lambda v: f"{int(v):,}")
+            _safe_apply(adset_disp, "clicks",      lambda v: f"{int(v):,}")
+            _safe_apply(adset_disp, "reach",       lambda v: f"{int(v):,}")
+            _safe_apply(adset_disp, "ctr",         lambda v: f"{v:.2f}%")
+            _safe_apply(adset_disp, "cpc",         lambda v: f"NT$ {v:.2f}" if pd.notna(v) else "-")
+            _safe_apply(adset_disp, "cpa",         lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
+            _safe_apply(adset_disp, "purchases",   lambda v: int(v))
+            _safe_apply(adset_disp, "leads",       lambda v: int(v))
+            _safe_apply(adset_disp, "lp_views",    lambda v: int(v))
+
+            adset_cols_map = {
+                "adset_name": "廣告組合", "spend": "花費", "impressions": "曝光",
+                "reach": "觸及", "clicks": "點擊", "ctr": "CTR", "cpc": "CPC",
+                "lp_views": "到達頁瀏覽", "leads": "名單", "purchases": "購買", "cpa": "CPA",
+            }
+            adset_show = [c for c in adset_cols_map if c in adset_disp.columns]
+            adset_disp = adset_disp[adset_show]
+            adset_disp.columns = [adset_cols_map[c] for c in adset_show]
+            st.dataframe(adset_disp, use_container_width=True, hide_index=True)
+
+        # 個別廣告（素材）明細
+        st.markdown("**個別廣告 / 素材明細**")
+        ad_disp = ad_df.copy()
+        _safe_apply(ad_disp, "ctr",         lambda v: f"{v:.2f}%")
+        _safe_apply(ad_disp, "spend",       lambda v: f"NT$ {v:,.0f}")
+        _safe_apply(ad_disp, "impressions", lambda v: f"{int(v):,}")
+        _safe_apply(ad_disp, "clicks",      lambda v: f"{int(v):,}")
+        _safe_apply(ad_disp, "reach",       lambda v: f"{int(v):,}")
+        _safe_apply(ad_disp, "frequency",   lambda v: f"{v:.2f}")
+        _safe_apply(ad_disp, "cpc",         lambda v: f"NT$ {v:.2f}" if v > 0 else "-")
+        _safe_apply(ad_disp, "cpm",         lambda v: f"NT$ {v:.0f}")
+        _safe_apply(ad_disp, "cpa",         lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
+        _safe_apply(ad_disp, "purchases",   int)
+        _safe_apply(ad_disp, "leads_action", int)
+        _safe_apply(ad_disp, "lp_views",    int)
+
+        col_label_map = {
+            "adset_name": "廣告組合", "ad_name": "廣告（素材）",
+            "spend": "花費", "impressions": "曝光", "reach": "觸及",
+            "frequency": "頻率", "clicks": "點擊", "ctr": "CTR",
+            "cpc": "CPC", "cpm": "CPM", "lp_views": "到達頁瀏覽",
+            "leads_action": "名單", "purchases": "購買", "cpa": "CPA",
+        }
+        show_cols = [c for c in col_label_map.keys() if c in ad_disp.columns]
+        ad_disp = ad_disp[show_cols]
+        ad_disp.columns = [col_label_map[c] for c in show_cols]
+        st.dataframe(ad_disp, use_container_width=True, hide_index=True)
+
 # ── 前測期數據（摺疊區塊）─────────────────────────────────────────────────────
 
 st.divider()
@@ -674,5 +855,48 @@ with st.expander(f"📂 前測期數據（{SALES_START_DATE} 前）— 點擊展
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         )
         st.plotly_chart(pre_fig, use_container_width=True)
+
+        # ── 前測期每日明細表 ────────────────────────────────────────────────
+        st.markdown("**每日明細**")
+        pre_table = pre_meta_df.copy()
+        if not pre_daily_leads.empty:
+            pre_table = pre_table.merge(pre_daily_leads, on="date", how="left")
+            pre_table["leads"] = pre_table["leads"].fillna(0).astype(int)
+            pre_table["cost_per_lead"] = pre_table.apply(
+                lambda r: r["spend"] / r["leads"] if r["leads"] > 0 else None, axis=1
+            )
+        else:
+            pre_table["leads"] = 0
+            pre_table["cost_per_lead"] = None
+
+        pre_table["date_str"] = pre_table["date"].dt.strftime("%Y-%m-%d")
+
+        pre_totals = {
+            "date_str": "合計",
+            "spend": pre_total_spend,
+            "clicks": pre_total_clicks,
+            "impressions": pre_total_impressions,
+            "cpc": pre_avg_cpc,
+            "leads": pre_total_leads,
+            "cost_per_lead": pre_cpl if pre_total_leads > 0 else None,
+        }
+        pre_display = pd.concat(
+            [pre_table[["date_str", "spend", "clicks", "impressions", "cpc", "leads", "cost_per_lead"]],
+             pd.DataFrame([pre_totals])],
+            ignore_index=True,
+        )
+
+        def _fmt(v, fn):
+            return fn(v) if isinstance(v, (int, float)) and pd.notna(v) else "-"
+
+        pre_display["spend"]         = pre_display["spend"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:,.0f}"))
+        pre_display["clicks"]        = pre_display["clicks"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
+        pre_display["impressions"]   = pre_display["impressions"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
+        pre_display["cpc"]           = pre_display["cpc"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:.2f}"))
+        pre_display["leads"]         = pre_display["leads"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
+        pre_display["cost_per_lead"] = pre_display["cost_per_lead"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:,.0f}"))
+
+        pre_display.columns = ["日期", "花費", "點擊", "曝光", "CPC", "名單數", "名單成本"]
+        st.dataframe(pre_display, use_container_width=True, hide_index=True)
     else:
         st.info("前測期間內無廣告數據")
