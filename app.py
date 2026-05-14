@@ -368,11 +368,15 @@ with st.spinner("載入廣告數據..."):
 start_ts = int(datetime.combine(start, datetime.min.time()).timestamp())
 end_ts   = int(datetime.combine(end, datetime.max.time()).timestamp())
 
-with st.spinner("載入銷售數據..."):
-    payments_df = fetch_teachify_payments(start_ts, end_ts) if TEACHIFY_API_KEY else pd.DataFrame()
-
-with st.spinner("載入折扣碼數據..."):
-    coupons_df = fetch_teachify_coupons() if TEACHIFY_API_KEY else pd.DataFrame()
+if not TEACHIFY_API_KEY:
+    st.warning("⚠️ 尚未設定 `TEACHIFY_API_KEY` 環境變數，銷售資料無法載入。請到 Zeabur Variables 設定。")
+    payments_df = pd.DataFrame()
+    coupons_df = pd.DataFrame()
+else:
+    with st.spinner("載入銷售數據..."):
+        payments_df = fetch_teachify_payments(start_ts, end_ts)
+    with st.spinner("載入折扣碼數據..."):
+        coupons_df = fetch_teachify_coupons()
 
 # 計算 KPI
 total_spend       = meta_df["spend"].sum() if not meta_df.empty else 0.0
@@ -421,11 +425,25 @@ if not meta_df.empty:
     chart_df["orders"]  = chart_df["orders"].fillna(0).astype(int)
     chart_df["revenue"] = chart_df["revenue"].fillna(0).astype(float)
 
+    # 依 SALES_START_DATE 將廣告花費拆成「名單期花費」與「銷售期花費」
+    sales_start_ts = pd.Timestamp(sales_start)
+    chart_df["spend_pretest"] = chart_df.apply(
+        lambda r: r["spend"] if r["date"] < sales_start_ts else 0, axis=1
+    )
+    chart_df["spend_sales"] = chart_df.apply(
+        lambda r: r["spend"] if r["date"] >= sales_start_ts else 0, axis=1
+    )
+
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=chart_df["date"], y=chart_df["spend"],
-        name="每日廣告花費 (NT$)", marker_color="#4C9BE8", yaxis="y1",
-        hovertemplate="%{x|%Y-%m-%d}<br>花費：NT$ %{y:,.0f}<extra></extra>",
+        x=chart_df["date"], y=chart_df["spend_pretest"],
+        name="名單期廣告花費 (NT$)", marker_color="#9CA3AF", yaxis="y1",
+        hovertemplate="%{x|%Y-%m-%d}<br>名單花費：NT$ %{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=chart_df["date"], y=chart_df["spend_sales"],
+        name="銷售期廣告花費 (NT$)", marker_color="#4C9BE8", yaxis="y1",
+        hovertemplate="%{x|%Y-%m-%d}<br>銷售花費：NT$ %{y:,.0f}<extra></extra>",
     ))
     fig.add_trace(go.Bar(
         x=chart_df["date"], y=chart_df["revenue"],
@@ -504,9 +522,13 @@ if not meta_df.empty:
         lambda r: r["spend"] / r["orders"] if r["orders"] > 0 else None, axis=1
     )
     table_df["date_str"] = table_df["date"].dt.strftime("%Y-%m-%d")
+    table_df["phase"] = table_df["date"].apply(
+        lambda d: "銷售期" if d >= pd.Timestamp(sales_start) else "名單期"
+    )
 
     totals = {
         "date_str": "合計",
+        "phase": "—",
         "spend": total_spend,
         "clicks": total_clicks,
         "impressions": total_impressions,
@@ -517,7 +539,7 @@ if not meta_df.empty:
         "cost_per_order": cost_per_order if total_orders > 0 else None,
     }
     display = pd.concat(
-        [table_df[["date_str", "spend", "clicks", "impressions", "cpc",
+        [table_df[["date_str", "phase", "spend", "clicks", "impressions", "cpc",
                    "orders", "revenue", "coupon_used", "cost_per_order"]],
          pd.DataFrame([totals])],
         ignore_index=True,
@@ -535,7 +557,7 @@ if not meta_df.empty:
     display["coupon_used"]    = display["coupon_used"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
     display["cost_per_order"] = display["cost_per_order"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:,.0f}"))
 
-    display.columns = ["日期", "廣告花費", "點擊", "曝光", "CPC",
+    display.columns = ["日期", "階段", "廣告花費", "點擊", "曝光", "CPC",
                        "銷售組數", "銷售金額", "折扣碼使用", "每筆訂單成本"]
     st.dataframe(display, use_container_width=True, hide_index=True)
 else:
