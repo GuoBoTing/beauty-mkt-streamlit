@@ -26,6 +26,10 @@ AD_ACCOUNT_ID  = _get_secret("AD_ACCOUNT_ID",  "act_111854365566947")
 PAGE_TITLE     = _get_secret("PAGE_TITLE",     "超老闆美業行銷課前測數據儀表板")
 CAMPAIGN_LABEL = _get_secret("CAMPAIGN_LABEL", "【勿動】超老闆前測問卷_柏廷")
 
+# 前測期專用的 Meta IDs（不設則 fallback 用上面的，方便單一活動的舊報表沿用）
+PRETEST_CAMPAIGN_ID   = _get_secret("PRETEST_CAMPAIGN_ID",   CAMPAIGN_ID)
+PRETEST_AD_ACCOUNT_ID = _get_secret("PRETEST_AD_ACCOUNT_ID", AD_ACCOUNT_ID)
+
 # 銷售期起始日（此日起，主畫面顯示銷售報表，之前的前測數據收進摺疊區塊）
 SALES_START_DATE = _get_secret("SALES_START_DATE", "2026-05-15")
 
@@ -84,12 +88,13 @@ def inspect_token(token: str) -> dict:
 # ── Meta 廣告 ─────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_meta_insights(start_date: str, end_date: str) -> pd.DataFrame:
+def fetch_meta_insights(start_date: str, end_date: str, campaign_id: str = "") -> pd.DataFrame:
     token = get_access_token()
     if not token:
         return pd.DataFrame()
 
-    url = f"https://graph.facebook.com/v19.0/{CAMPAIGN_ID}/insights"
+    cid = campaign_id or CAMPAIGN_ID
+    url = f"https://graph.facebook.com/v19.0/{cid}/insights"
     params = {
         "fields": "spend,clicks,impressions,cpc",
         "time_range": f'{{"since":"{start_date}","until":"{end_date}"}}',
@@ -574,9 +579,15 @@ else:
 st.divider()
 
 with st.expander(f"📂 前測期數據（{SALES_START_DATE} 前）— 點擊展開", expanded=False):
-    # 前測期：earliest 到 SALES_START_DATE - 1 day
+    # 前測期：抓舊 campaign 的完整日期範圍以供選擇器使用
     pretest_end = sales_start - timedelta(days=1)
-    pretest_start = full_df["date"].min().date() if not full_df.empty else (pretest_end - timedelta(days=30))
+    _pretest_earliest = pretest_end - timedelta(days=37 * 30)
+    _pretest_full = fetch_meta_insights(
+        _pretest_earliest.strftime("%Y-%m-%d"),
+        pretest_end.strftime("%Y-%m-%d"),
+        campaign_id=PRETEST_CAMPAIGN_ID,
+    )
+    pretest_start = _pretest_full["date"].min().date() if not _pretest_full.empty else (pretest_end - timedelta(days=30))
 
     pre_date_range = st.date_input(
         "前測期日期範圍",
@@ -590,7 +601,11 @@ with st.expander(f"📂 前測期數據（{SALES_START_DATE} 前）— 點擊展
     else:
         pre_start = pre_end = pre_date_range
 
-    pre_meta_df = fetch_meta_insights(pre_start.strftime("%Y-%m-%d"), pre_end.strftime("%Y-%m-%d"))
+    pre_meta_df = fetch_meta_insights(
+        pre_start.strftime("%Y-%m-%d"),
+        pre_end.strftime("%Y-%m-%d"),
+        campaign_id=PRETEST_CAMPAIGN_ID,
+    )
     pre_sheet_df = fetch_sheet_data()
 
     pre_date_col = detect_date_column(pre_sheet_df) if not pre_sheet_df.empty else None
