@@ -20,6 +20,13 @@ AD_ACCOUNT_ID  = _get_secret("AD_ACCOUNT_ID",  "act_111854365566947")
 PAGE_TITLE     = _get_secret("PAGE_TITLE",     "超老闆美業行銷課前測數據儀表板")
 CAMPAIGN_LABEL = _get_secret("CAMPAIGN_LABEL", "【勿動】超老闆前測問卷_柏廷")
 
+# 銷售期起始日（此日起，主畫面顯示銷售報表，之前的前測數據收進摺疊區塊）
+SALES_START_DATE = _get_secret("SALES_START_DATE", "2026-05-15")
+
+# Teachify Admin API
+TEACHIFY_API_KEY = _get_secret("TEACHIFY_API_KEY", "")
+TEACHIFY_GRAPHQL = "https://teachify.io/admin/graphql"
+
 # SHEET_CSV_URLS：逗號分隔的多個 Google Sheet CSV export URL
 _raw_urls = _get_secret(
     "SHEET_CSV_URLS",
@@ -68,7 +75,7 @@ def inspect_token(token: str) -> dict:
     return resp.json().get("data", {})
 
 
-# ── 資料抓取 ──────────────────────────────────────────────────────────────────
+# ── Meta 廣告 ─────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_meta_insights(start_date: str, end_date: str) -> pd.DataFrame:
@@ -107,6 +114,8 @@ def fetch_meta_insights(start_date: str, end_date: str) -> pd.DataFrame:
     return df[["date", "spend", "clicks", "impressions", "cpc"]].sort_values("date")
 
 
+# ── Google Sheet（前測期名單）────────────────────────────────────────────────
+
 def _fetch_csv(url: str, label: str) -> pd.DataFrame:
     try:
         import io
@@ -128,6 +137,108 @@ def fetch_sheet_data() -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+# ── Teachify Admin API ────────────────────────────────────────────────────────
+
+def _teachify_query(query: str, variables: dict | None = None) -> dict:
+    if not TEACHIFY_API_KEY:
+        return {"errors": [{"message": "尚未設定 TEACHIFY_API_KEY"}]}
+    resp = requests.post(
+        TEACHIFY_GRAPHQL,
+        headers={
+            "X-Teachify-API-Key": TEACHIFY_API_KEY,
+            "Content-Type": "application/json",
+        },
+        json={"query": query, "variables": variables or {}},
+        timeout=30,
+    )
+    return resp.json()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_teachify_payments(start_ts: int, end_ts: int) -> pd.DataFrame:
+    """抓 [start_ts, end_ts] 期間已付款的訂單。回傳 DataFrame 含日期、金額、折扣碼。"""
+    query = """
+    query($filter: AdminPaymentFilter, $page: Int!, $perPage: Int!) {
+      payments(filter: $filter, page: $page, perPage: $perPage) {
+        nodesCount
+        totalPages
+        hasNextPage
+        nodes {
+          id
+          amount
+          discountAmount
+          couponCode
+          paidAt
+          refundedAt
+          tradeNo
+          lineitems { name amount }
+        }
+      }
+    }
+    """
+    all_rows: list[dict] = []
+    page = 1
+    while True:
+        variables = {
+            "filter": {"paidAt": {"gte": start_ts, "lte": end_ts}},
+            "page": page,
+            "perPage": 50,
+        }
+        data = _teachify_query(query, variables)
+        if "errors" in data:
+            st.error(f"Teachify API 錯誤：{data['errors'][0].get('message')}")
+            return pd.DataFrame()
+        payload = data.get("data", {}).get("payments", {})
+        all_rows.extend(payload.get("nodes", []))
+        if not payload.get("hasNextPage"):
+            break
+        page += 1
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_rows)
+    df["paidAt_dt"] = pd.to_datetime(df["paidAt"], unit="s")
+    df["date"] = df["paidAt_dt"].dt.normalize()
+    df["amount"] = df["amount"].astype(float)
+    df["discountAmount"] = df["discountAmount"].fillna(0).astype(float)
+    df["used_coupon"] = df["couponCode"].notna() & (df["couponCode"] != "")
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_teachify_coupons() -> pd.DataFrame:
+    """抓所有折扣碼及其累積使用次數。"""
+    query = """
+    query($page: Int!, $perPage: Int!) {
+      coupons(page: $page, perPage: $perPage) {
+        nodesCount
+        hasNextPage
+        nodes {
+          id code name amount couponType appliedCount redemptionLimit active
+        }
+      }
+    }
+    """
+    all_rows: list[dict] = []
+    page = 1
+    while True:
+        data = _teachify_query(query, {"page": page, "perPage": 50})
+        if "errors" in data:
+            st.error(f"Teachify Coupons API 錯誤：{data['errors'][0].get('message')}")
+            return pd.DataFrame()
+        payload = data.get("data", {}).get("coupons", {})
+        all_rows.extend(payload.get("nodes", []))
+        if not payload.get("hasNextPage"):
+            break
+        page += 1
+
+    if not all_rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(all_rows)
+    return df
 
 
 # ── 工具函式 ──────────────────────────────────────────────────────────────────
@@ -168,7 +279,13 @@ if not get_access_token():
     st.error("請設定環境變數 META_ACCESS_TOKEN")
     st.stop()
 
-# ── 日期選擇 ──────────────────────────────────────────────────────────────────
+try:
+    sales_start = datetime.strptime(SALES_START_DATE, "%Y-%m-%d").date()
+except Exception:
+    st.error(f"SALES_START_DATE 格式錯誤（應為 YYYY-MM-DD），目前值：{SALES_START_DATE}")
+    st.stop()
+
+# ── 側邊欄 ────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.header("篩選條件")
@@ -209,22 +326,21 @@ with st.sidebar:
 
     st.divider()
 
-    # 先抓全期資料以取得可用日期範圍（Meta API 最多支援往前 37 個月）
+    # 先抓全期 Meta 資料以取得可用日期範圍
     earliest = date.today() - timedelta(days=37 * 30)
+    yesterday = date.today() - timedelta(days=1)
     with st.spinner("載入日期範圍..."):
-        full_df = fetch_meta_insights(earliest.strftime("%Y-%m-%d"), date.today().strftime("%Y-%m-%d"))
+        full_df = fetch_meta_insights(earliest.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d"))
 
-    if full_df.empty:
-        st.stop()
-
-    min_date = full_df["date"].min().date()
-    max_date = date.today()
+    # 銷售期日期範圍：從 sales_start 到昨天
+    sales_min = max(sales_start, full_df["date"].min().date()) if not full_df.empty else sales_start
+    sales_max = yesterday if yesterday >= sales_start else sales_start
 
     date_range = st.date_input(
-        "日期範圍",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date,
+        "銷售期日期範圍",
+        value=(sales_min, sales_max),
+        min_value=sales_start,
+        max_value=sales_max,
     )
 
     if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
@@ -237,7 +353,9 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-# ── 依日期範圍過濾 ─────────────────────────────────────────────────────────────
+# ── 銷售期數據 ────────────────────────────────────────────────────────────────
+
+st.header(f"📈 銷售期數據（{SALES_START_DATE} 起）")
 
 start_str = start.strftime("%Y-%m-%d")
 end_str   = end.strftime("%Y-%m-%d")
@@ -245,108 +363,85 @@ end_str   = end.strftime("%Y-%m-%d")
 with st.spinner("載入廣告數據..."):
     meta_df = fetch_meta_insights(start_str, end_str)
 
-with st.spinner("載入名單數據..."):
-    sheet_df = fetch_sheet_data()
+# Teachify 訂單（依日期過濾）
+start_ts = int(datetime.combine(start, datetime.min.time()).timestamp())
+end_ts   = int(datetime.combine(end, datetime.max.time()).timestamp())
 
-# ── 名單數量 & 日期分布 ────────────────────────────────────────────────────────
+with st.spinner("載入銷售數據..."):
+    payments_df = fetch_teachify_payments(start_ts, end_ts) if TEACHIFY_API_KEY else pd.DataFrame()
 
-date_col = detect_date_column(sheet_df) if not sheet_df.empty else None
+with st.spinner("載入折扣碼數據..."):
+    coupons_df = fetch_teachify_coupons() if TEACHIFY_API_KEY else pd.DataFrame()
 
-if date_col and not sheet_df.empty:
-    sheet_df[date_col] = parse_tw_datetime(sheet_df[date_col])
-    filtered_sheet = sheet_df[
-        (sheet_df[date_col] >= pd.Timestamp(start)) &
-        (sheet_df[date_col] <= pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
-    ]
-    # 每日名單數
-    daily_leads = (
-        filtered_sheet.groupby(filtered_sheet[date_col].dt.normalize())
-        .size()
-        .reset_index(name="leads")
-    )
-    daily_leads = daily_leads.rename(columns={date_col: "date"})
-    daily_leads = daily_leads[["date", "leads"]]
-    total_leads = int(filtered_sheet.shape[0])
-else:
-    # 無時間欄位 → 只顯示總數
-    total_leads = int(sheet_df.shape[0]) if not sheet_df.empty else 0
-    daily_leads = pd.DataFrame()
-
-# ── 彙總指標 ──────────────────────────────────────────────────────────────────
-
-total_spend      = meta_df["spend"].sum() if not meta_df.empty else 0.0
-total_clicks     = int(meta_df["clicks"].sum()) if not meta_df.empty else 0
+# 計算 KPI
+total_spend       = meta_df["spend"].sum() if not meta_df.empty else 0.0
+total_clicks      = int(meta_df["clicks"].sum()) if not meta_df.empty else 0
 total_impressions = int(meta_df["impressions"].sum()) if not meta_df.empty else 0
-avg_cpc          = (total_spend / total_clicks) if total_clicks > 0 else 0.0
-cost_per_lead    = (total_spend / total_leads) if total_leads > 0 else 0.0
+avg_cpc           = (total_spend / total_clicks) if total_clicks > 0 else 0.0
 
-# ── KPI 卡片 ──────────────────────────────────────────────────────────────────
+total_orders   = int(payments_df.shape[0]) if not payments_df.empty else 0
+total_revenue  = float(payments_df["amount"].sum()) if not payments_df.empty else 0.0
+coupon_orders  = int(payments_df["used_coupon"].sum()) if not payments_df.empty else 0
+cost_per_order = (total_spend / total_orders) if total_orders > 0 else 0.0
+roas           = (total_revenue / total_spend) if total_spend > 0 else 0.0
 
-st.subheader("整體成效")
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("總花費",       fmt_currency(total_spend))
-c2.metric("總點擊數",     fmt_number(total_clicks))
-c3.metric("總曝光數",     fmt_number(total_impressions))
-c4.metric("平均 CPC",     f"NT$ {avg_cpc:.2f}")
-c5.metric("前測名單數",   fmt_number(total_leads))
-c6.metric("名單成本",     fmt_currency(cost_per_lead))
+# KPI 卡片
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("銷售組數",       fmt_number(total_orders))
+c2.metric("銷售金額",       fmt_currency(total_revenue))
+c3.metric("折扣碼使用組數", fmt_number(coupon_orders))
+c4.metric("ROAS",          f"{roas:.2f}x" if total_spend > 0 else "-")
+
+c5, c6, c7, c8 = st.columns(4)
+c5.metric("廣告花費",       fmt_currency(total_spend))
+c6.metric("點擊數",         fmt_number(total_clicks))
+c7.metric("平均 CPC",       f"NT$ {avg_cpc:.2f}")
+c8.metric("每筆訂單成本",   fmt_currency(cost_per_order) if total_orders > 0 else "-")
 
 st.divider()
 
-# ── 趨勢圖 ────────────────────────────────────────────────────────────────────
+# ── 銷售趨勢圖 ────────────────────────────────────────────────────────────────
 
-st.subheader("數據趨勢")
+st.subheader("每日銷售與廣告花費")
 
 if not meta_df.empty:
-    # 合併每日名單
-    chart_df = meta_df.copy()
-    if not daily_leads.empty:
-        chart_df = chart_df.merge(daily_leads, on="date", how="left")
-        chart_df["leads"] = chart_df["leads"].fillna(0).astype(int)
-        # 累積成本 = 累積花費 / 累積名單
-        chart_df["cum_spend"] = chart_df["spend"].cumsum()
-        chart_df["cum_leads"] = chart_df["leads"].cumsum()
-        chart_df["daily_cost_per_lead"] = chart_df.apply(
-            lambda r: r["cum_spend"] / r["cum_leads"] if r["cum_leads"] > 0 else None,
-            axis=1,
+    # 每日銷售統計
+    if not payments_df.empty:
+        daily_sales = (
+            payments_df.groupby("date")
+            .agg(orders=("id", "count"), revenue=("amount", "sum"))
+            .reset_index()
         )
     else:
-        chart_df["daily_cost_per_lead"] = None
+        daily_sales = pd.DataFrame(columns=["date", "orders", "revenue"])
+
+    chart_df = meta_df.copy()
+    chart_df = chart_df.merge(daily_sales, on="date", how="left")
+    chart_df["orders"]  = chart_df["orders"].fillna(0).astype(int)
+    chart_df["revenue"] = chart_df["revenue"].fillna(0).astype(float)
 
     fig = go.Figure()
-
-    # 長條圖：每日花費
     fig.add_trace(go.Bar(
-        x=chart_df["date"],
-        y=chart_df["spend"],
-        name="每日花費 (NT$)",
-        marker_color="#4C9BE8",
-        yaxis="y1",
+        x=chart_df["date"], y=chart_df["spend"],
+        name="每日廣告花費 (NT$)", marker_color="#4C9BE8", yaxis="y1",
         hovertemplate="%{x|%Y-%m-%d}<br>花費：NT$ %{y:,.0f}<extra></extra>",
     ))
-
-    # 折線圖：累積名單成本
-    if chart_df["daily_cost_per_lead"].notna().any():
-        fig.add_trace(go.Scatter(
-            x=chart_df["date"],
-            y=chart_df["daily_cost_per_lead"],
-            name="累積名單成本 (NT$)",
-            mode="lines+markers",
-            line=dict(color="#FF6B6B", width=2),
-            marker=dict(size=6),
-            yaxis="y2",
-            hovertemplate="%{x|%Y-%m-%d}<br>名單成本：NT$ %{y:,.0f}<extra></extra>",
-        ))
-
+    fig.add_trace(go.Bar(
+        x=chart_df["date"], y=chart_df["revenue"],
+        name="每日銷售金額 (NT$)", marker_color="#FFB454", yaxis="y1",
+        hovertemplate="%{x|%Y-%m-%d}<br>銷售：NT$ %{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=chart_df["date"], y=chart_df["orders"],
+        name="每日銷售組數", mode="lines+markers",
+        line=dict(color="#FF6B6B", width=2), marker=dict(size=6), yaxis="y2",
+        hovertemplate="%{x|%Y-%m-%d}<br>訂單：%{y}<extra></extra>",
+    ))
     fig.update_layout(
+        barmode="group",
         xaxis=dict(title="日期", tickformat="%m/%d"),
-        yaxis=dict(title="每日花費 (NT$)", showgrid=False),
-        yaxis2=dict(
-            title="累積名單成本 (NT$)",
-            overlaying="y",
-            side="right",
-            showgrid=False,
-        ),
+        yaxis=dict(title="金額 (NT$)", showgrid=False),
+        yaxis2=dict(title="訂單數", overlaying="y", side="right", showgrid=False),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         hovermode="x unified",
         height=420,
@@ -360,56 +455,180 @@ else:
 
 st.divider()
 
-# ── 每日數據列表 ───────────────────────────────────────────────────────────────
+# ── 折扣碼明細 ────────────────────────────────────────────────────────────────
 
-st.subheader("每日數據")
+st.subheader("折扣碼使用狀況")
+
+if not coupons_df.empty:
+    display_coupons = coupons_df.copy()
+    display_coupons["amount"] = display_coupons.apply(
+        lambda r: f"{int(r['amount'])}%" if r["couponType"] == "percentage" else f"NT$ {int(r['amount']):,}",
+        axis=1,
+    )
+    display_coupons["redemptionLimit"] = display_coupons["redemptionLimit"].apply(
+        lambda v: f"{int(v)}" if pd.notna(v) else "無限制"
+    )
+    display_coupons["active"] = display_coupons["active"].map({True: "✅ 啟用", False: "❌ 停用"})
+    display_coupons = display_coupons[["code", "name", "amount", "appliedCount", "redemptionLimit", "active"]]
+    display_coupons.columns = ["折扣碼", "名稱", "折抵", "使用次數", "使用上限", "狀態"]
+    display_coupons = display_coupons.sort_values("使用次數", ascending=False)
+    st.dataframe(display_coupons, use_container_width=True, hide_index=True)
+else:
+    st.info("尚無折扣碼資料（或 Teachify API Key 未設定）")
+
+st.divider()
+
+# ── 銷售期每日明細 ────────────────────────────────────────────────────────────
+
+st.subheader("每日銷售明細")
 
 if not meta_df.empty:
     table_df = meta_df.copy()
-    if not daily_leads.empty:
-        table_df = table_df.merge(daily_leads, on="date", how="left")
-        table_df["leads"] = table_df["leads"].fillna(0).astype(int)
-        table_df["cost_per_lead"] = table_df.apply(
-            lambda r: r["spend"] / r["leads"] if r["leads"] > 0 else None, axis=1
+    if not payments_df.empty:
+        daily_sales = (
+            payments_df.groupby("date")
+            .agg(orders=("id", "count"), revenue=("amount", "sum"), coupon_used=("used_coupon", "sum"))
+            .reset_index()
         )
+        table_df = table_df.merge(daily_sales, on="date", how="left")
     else:
-        table_df["leads"] = "-"
-        table_df["cost_per_lead"] = "-"
+        table_df["orders"] = 0
+        table_df["revenue"] = 0.0
+        table_df["coupon_used"] = 0
 
-    table_df["date"] = table_df["date"].dt.strftime("%Y-%m-%d")
+    table_df["orders"]      = table_df["orders"].fillna(0).astype(int)
+    table_df["revenue"]     = table_df["revenue"].fillna(0).astype(float)
+    table_df["coupon_used"] = table_df["coupon_used"].fillna(0).astype(int)
+    table_df["cost_per_order"] = table_df.apply(
+        lambda r: r["spend"] / r["orders"] if r["orders"] > 0 else None, axis=1
+    )
+    table_df["date_str"] = table_df["date"].dt.strftime("%Y-%m-%d")
 
-    # 合計列
     totals = {
-        "date": "合計",
+        "date_str": "合計",
         "spend": total_spend,
         "clicks": total_clicks,
         "impressions": total_impressions,
         "cpc": avg_cpc,
-        "leads": total_leads if total_leads > 0 else "-",
-        "cost_per_lead": cost_per_lead if total_leads > 0 else "-",
+        "orders": total_orders,
+        "revenue": total_revenue,
+        "coupon_used": coupon_orders,
+        "cost_per_order": cost_per_order if total_orders > 0 else None,
     }
-    table_df = pd.concat(
-        [table_df, pd.DataFrame([totals])],
+    display = pd.concat(
+        [table_df[["date_str", "spend", "clicks", "impressions", "cpc",
+                   "orders", "revenue", "coupon_used", "cost_per_order"]],
+         pd.DataFrame([totals])],
         ignore_index=True,
     )
 
-    # 欄位格式化（數字欄位）
-    def fmt_col(df, col, fmt_fn):
-        if col in df.columns:
-            df[col] = df[col].apply(
-                lambda v: fmt_fn(v) if isinstance(v, (int, float)) else v
-            )
+    def _fmt(v, fn):
+        return fn(v) if isinstance(v, (int, float)) and pd.notna(v) else "-"
 
-    display_df = table_df.copy()
-    fmt_col(display_df, "spend",         lambda v: f"NT$ {v:,.0f}")
-    fmt_col(display_df, "clicks",        lambda v: f"{v:,}")
-    fmt_col(display_df, "impressions",   lambda v: f"{v:,}")
-    fmt_col(display_df, "cpc",           lambda v: f"NT$ {v:.2f}")
-    fmt_col(display_df, "leads",         lambda v: f"{v:,}")
-    fmt_col(display_df, "cost_per_lead", lambda v: f"NT$ {v:,.0f}")
+    display["spend"]          = display["spend"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:,.0f}"))
+    display["clicks"]         = display["clicks"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
+    display["impressions"]    = display["impressions"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
+    display["cpc"]            = display["cpc"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:.2f}"))
+    display["orders"]         = display["orders"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
+    display["revenue"]        = display["revenue"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:,.0f}"))
+    display["coupon_used"]    = display["coupon_used"].apply(lambda v: _fmt(v, lambda x: f"{int(x):,}"))
+    display["cost_per_order"] = display["cost_per_order"].apply(lambda v: _fmt(v, lambda x: f"NT$ {x:,.0f}"))
 
-    display_df.columns = ["日期", "花費", "點擊數", "曝光數", "CPC", "名單數", "名單成本"]
-
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    display.columns = ["日期", "廣告花費", "點擊", "曝光", "CPC",
+                       "銷售組數", "銷售金額", "折扣碼使用", "每筆訂單成本"]
+    st.dataframe(display, use_container_width=True, hide_index=True)
 else:
     st.info("所選日期範圍內無廣告數據")
+
+# ── 前測期數據（摺疊區塊）─────────────────────────────────────────────────────
+
+st.divider()
+
+with st.expander(f"📂 前測期數據（{SALES_START_DATE} 前）— 點擊展開", expanded=False):
+    # 前測期：earliest 到 SALES_START_DATE - 1 day
+    pretest_end = sales_start - timedelta(days=1)
+    pretest_start = full_df["date"].min().date() if not full_df.empty else (pretest_end - timedelta(days=30))
+
+    pre_date_range = st.date_input(
+        "前測期日期範圍",
+        value=(pretest_start, pretest_end),
+        min_value=pretest_start,
+        max_value=pretest_end,
+        key="pretest_date_range",
+    )
+    if isinstance(pre_date_range, (list, tuple)) and len(pre_date_range) == 2:
+        pre_start, pre_end = pre_date_range
+    else:
+        pre_start = pre_end = pre_date_range
+
+    pre_meta_df = fetch_meta_insights(pre_start.strftime("%Y-%m-%d"), pre_end.strftime("%Y-%m-%d"))
+    pre_sheet_df = fetch_sheet_data()
+
+    pre_date_col = detect_date_column(pre_sheet_df) if not pre_sheet_df.empty else None
+    if pre_date_col and not pre_sheet_df.empty:
+        pre_sheet_df[pre_date_col] = parse_tw_datetime(pre_sheet_df[pre_date_col])
+        filtered_sheet = pre_sheet_df[
+            (pre_sheet_df[pre_date_col] >= pd.Timestamp(pre_start)) &
+            (pre_sheet_df[pre_date_col] <= pd.Timestamp(pre_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+        ]
+        pre_daily_leads = (
+            filtered_sheet.groupby(filtered_sheet[pre_date_col].dt.normalize())
+            .size().reset_index(name="leads")
+        ).rename(columns={pre_date_col: "date"})[["date", "leads"]]
+        pre_total_leads = int(filtered_sheet.shape[0])
+    else:
+        pre_total_leads = int(pre_sheet_df.shape[0]) if not pre_sheet_df.empty else 0
+        pre_daily_leads = pd.DataFrame()
+
+    pre_total_spend       = pre_meta_df["spend"].sum() if not pre_meta_df.empty else 0.0
+    pre_total_clicks      = int(pre_meta_df["clicks"].sum()) if not pre_meta_df.empty else 0
+    pre_total_impressions = int(pre_meta_df["impressions"].sum()) if not pre_meta_df.empty else 0
+    pre_avg_cpc           = (pre_total_spend / pre_total_clicks) if pre_total_clicks > 0 else 0.0
+    pre_cpl               = (pre_total_spend / pre_total_leads) if pre_total_leads > 0 else 0.0
+
+    p1, p2, p3, p4, p5, p6 = st.columns(6)
+    p1.metric("總花費",     fmt_currency(pre_total_spend))
+    p2.metric("總點擊數",   fmt_number(pre_total_clicks))
+    p3.metric("總曝光數",   fmt_number(pre_total_impressions))
+    p4.metric("平均 CPC",   f"NT$ {pre_avg_cpc:.2f}")
+    p5.metric("前測名單數", fmt_number(pre_total_leads))
+    p6.metric("名單成本",   fmt_currency(pre_cpl))
+
+    if not pre_meta_df.empty:
+        pre_chart = pre_meta_df.copy()
+        if not pre_daily_leads.empty:
+            pre_chart = pre_chart.merge(pre_daily_leads, on="date", how="left")
+            pre_chart["leads"] = pre_chart["leads"].fillna(0).astype(int)
+            pre_chart["cum_spend"] = pre_chart["spend"].cumsum()
+            pre_chart["cum_leads"] = pre_chart["leads"].cumsum()
+            pre_chart["daily_cost_per_lead"] = pre_chart.apply(
+                lambda r: r["cum_spend"] / r["cum_leads"] if r["cum_leads"] > 0 else None, axis=1
+            )
+        else:
+            pre_chart["daily_cost_per_lead"] = None
+
+        pre_fig = go.Figure()
+        pre_fig.add_trace(go.Bar(
+            x=pre_chart["date"], y=pre_chart["spend"],
+            name="每日花費 (NT$)", marker_color="#4C9BE8", yaxis="y1",
+            hovertemplate="%{x|%Y-%m-%d}<br>花費：NT$ %{y:,.0f}<extra></extra>",
+        ))
+        if pre_chart["daily_cost_per_lead"].notna().any():
+            pre_fig.add_trace(go.Scatter(
+                x=pre_chart["date"], y=pre_chart["daily_cost_per_lead"],
+                name="累積名單成本 (NT$)", mode="lines+markers",
+                line=dict(color="#FF6B6B", width=2), marker=dict(size=6), yaxis="y2",
+                hovertemplate="%{x|%Y-%m-%d}<br>名單成本：NT$ %{y:,.0f}<extra></extra>",
+            ))
+        pre_fig.update_layout(
+            xaxis=dict(title="日期", tickformat="%m/%d"),
+            yaxis=dict(title="每日花費 (NT$)", showgrid=False),
+            yaxis2=dict(title="累積名單成本 (NT$)", overlaying="y", side="right", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            hovermode="x unified", height=380,
+            margin=dict(l=0, r=0, t=10, b=0),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(pre_fig, use_container_width=True)
+    else:
+        st.info("前測期間內無廣告數據")
