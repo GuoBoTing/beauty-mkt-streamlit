@@ -3,7 +3,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+
+# 台灣時區（伺服器可能跑在 UTC，需要明確指定才能拿到正確的「今天」）
+TW_TZ = timezone(timedelta(hours=8))
+
+def tw_today() -> date:
+    return datetime.now(TW_TZ).date()
 
 # ── 設定 ──────────────────────────────────────────────────────────────────────
 
@@ -327,8 +333,8 @@ with st.sidebar:
     st.divider()
 
     # 先抓全期 Meta 資料以取得可用日期範圍
-    earliest = date.today() - timedelta(days=37 * 30)
-    today = date.today()
+    earliest = tw_today() - timedelta(days=37 * 30)
+    today = tw_today()
     yesterday = today - timedelta(days=1)
     with st.spinner("載入日期範圍..."):
         full_df = fetch_meta_insights(earliest.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
