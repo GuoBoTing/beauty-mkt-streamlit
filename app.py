@@ -432,12 +432,155 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-# ── 銷售期數據 ────────────────────────────────────────────────────────────────
+    # ── 管理員設定 ─────────────────────────────────────────────────────────
+    st.divider()
 
-st.header("📈 銷售期數據")
+    ADMIN_PASSWORD = "wecan90202317"
+
+    if "admin_unlocked" not in st.session_state:
+        st.session_state["admin_unlocked"] = False
+    if "page_mode" not in st.session_state:
+        st.session_state["page_mode"] = "main"
+
+    with st.expander("🔐 管理員設定", expanded=False):
+        if not st.session_state["admin_unlocked"]:
+            with st.form("admin_login", clear_on_submit=False):
+                pw = st.text_input("密碼", type="password", placeholder="輸入管理員密碼", label_visibility="collapsed")
+                if st.form_submit_button("登入", use_container_width=True):
+                    if pw == ADMIN_PASSWORD:
+                        st.session_state["admin_unlocked"] = True
+                        st.session_state["page_mode"] = "admin"
+                        st.rerun()
+                    else:
+                        st.error("密碼錯誤")
+        else:
+            st.success("已登入")
+            page_choice = st.radio(
+                "頁面切換",
+                options=["主頁", "管理員（素材成效）"],
+                index=0 if st.session_state["page_mode"] == "main" else 1,
+                label_visibility="collapsed",
+            )
+            new_mode = "main" if page_choice == "主頁" else "admin"
+            if new_mode != st.session_state["page_mode"]:
+                st.session_state["page_mode"] = new_mode
+                st.rerun()
+            if st.button("🔒 登出", use_container_width=True):
+                st.session_state["admin_unlocked"] = False
+                st.session_state["page_mode"] = "main"
+                st.rerun()
+
+# ── 共用變數 ──────────────────────────────────────────────────────────────────
 
 start_str = start.strftime("%Y-%m-%d")
 end_str   = end.strftime("%Y-%m-%d")
+
+# ── 頁面路由 ──────────────────────────────────────────────────────────────────
+
+PAGE_MODE = st.session_state.get("page_mode", "main")
+if PAGE_MODE == "admin" and not st.session_state.get("admin_unlocked"):
+    # 防呆：未登入卻是 admin mode → 自動回主頁
+    PAGE_MODE = "main"
+    st.session_state["page_mode"] = "main"
+
+# ── 管理員頁面（素材成效）────────────────────────────────────────────────────
+
+if PAGE_MODE == "admin":
+    st.header("🎨 素材成效（管理員）")
+    st.caption(f"日期範圍：{start_str} ~ {end_str}（在側邊欄調整）")
+
+    with st.spinner("載入素材成效..."):
+        ad_df = fetch_meta_ad_insights(start_str, end_str)
+
+    if ad_df.empty:
+        st.info("所選日期範圍內無素材數據")
+    else:
+        def _safe_apply(df, col, fn):
+            if col in df.columns:
+                df[col] = df[col].apply(fn)
+
+        # 廣告組合彙總
+        st.subheader("廣告組合（Ad Set）彙總")
+        if "adset_name" in ad_df.columns:
+            agg_dict = {
+                "spend":       ("spend", "sum"),
+                "impressions": ("impressions", "sum"),
+                "clicks":      ("clicks", "sum"),
+                "purchases":   ("purchases", "sum"),
+                "leads":       ("leads_action", "sum"),
+                "lp_views":    ("lp_views", "sum"),
+            }
+            if "reach" in ad_df.columns:
+                agg_dict["reach"] = ("reach", "sum")
+            adset_agg = ad_df.groupby(["adset_id", "adset_name"], as_index=False).agg(**agg_dict)
+
+            adset_agg["ctr"] = adset_agg.apply(
+                lambda r: (r["clicks"] / r["impressions"] * 100) if r["impressions"] > 0 else 0, axis=1
+            )
+            adset_agg["cpc"] = adset_agg.apply(
+                lambda r: r["spend"] / r["clicks"] if r["clicks"] > 0 else None, axis=1
+            )
+            adset_agg["cpa"] = adset_agg.apply(
+                lambda r: r["spend"] / (r["purchases"] if r["purchases"] > 0 else r["leads"])
+                          if (r["purchases"] > 0 or r["leads"] > 0) else None,
+                axis=1,
+            )
+
+            adset_disp = adset_agg.copy()
+            _safe_apply(adset_disp, "spend",       lambda v: f"NT$ {v:,.0f}")
+            _safe_apply(adset_disp, "impressions", lambda v: f"{int(v):,}")
+            _safe_apply(adset_disp, "clicks",      lambda v: f"{int(v):,}")
+            _safe_apply(adset_disp, "reach",       lambda v: f"{int(v):,}")
+            _safe_apply(adset_disp, "ctr",         lambda v: f"{v:.2f}%")
+            _safe_apply(adset_disp, "cpc",         lambda v: f"NT$ {v:.2f}" if pd.notna(v) else "-")
+            _safe_apply(adset_disp, "cpa",         lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
+            _safe_apply(adset_disp, "purchases",   lambda v: int(v))
+            _safe_apply(adset_disp, "leads",       lambda v: int(v))
+            _safe_apply(adset_disp, "lp_views",    lambda v: int(v))
+
+            adset_cols_map = {
+                "adset_name": "廣告組合", "spend": "花費", "impressions": "曝光",
+                "reach": "觸及", "clicks": "點擊", "ctr": "CTR", "cpc": "CPC",
+                "lp_views": "到達頁瀏覽", "leads": "名單", "purchases": "購買", "cpa": "CPA",
+            }
+            adset_show = [c for c in adset_cols_map if c in adset_disp.columns]
+            adset_disp = adset_disp[adset_show]
+            adset_disp.columns = [adset_cols_map[c] for c in adset_show]
+            st.dataframe(adset_disp, use_container_width=True, hide_index=True)
+
+        # 個別廣告（素材）明細
+        st.subheader("個別廣告 / 素材明細")
+        ad_disp = ad_df.copy()
+        _safe_apply(ad_disp, "ctr",          lambda v: f"{v:.2f}%")
+        _safe_apply(ad_disp, "spend",        lambda v: f"NT$ {v:,.0f}")
+        _safe_apply(ad_disp, "impressions",  lambda v: f"{int(v):,}")
+        _safe_apply(ad_disp, "clicks",       lambda v: f"{int(v):,}")
+        _safe_apply(ad_disp, "reach",        lambda v: f"{int(v):,}")
+        _safe_apply(ad_disp, "frequency",    lambda v: f"{v:.2f}")
+        _safe_apply(ad_disp, "cpc",          lambda v: f"NT$ {v:.2f}" if v > 0 else "-")
+        _safe_apply(ad_disp, "cpm",          lambda v: f"NT$ {v:.0f}")
+        _safe_apply(ad_disp, "cpa",          lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
+        _safe_apply(ad_disp, "purchases",    int)
+        _safe_apply(ad_disp, "leads_action", int)
+        _safe_apply(ad_disp, "lp_views",     int)
+
+        col_label_map = {
+            "adset_name": "廣告組合", "ad_name": "廣告（素材）",
+            "spend": "花費", "impressions": "曝光", "reach": "觸及",
+            "frequency": "頻率", "clicks": "點擊", "ctr": "CTR",
+            "cpc": "CPC", "cpm": "CPM", "lp_views": "到達頁瀏覽",
+            "leads_action": "名單", "purchases": "購買", "cpa": "CPA",
+        }
+        show_cols = [c for c in col_label_map.keys() if c in ad_disp.columns]
+        ad_disp = ad_disp[show_cols]
+        ad_disp.columns = [col_label_map[c] for c in show_cols]
+        st.dataframe(ad_disp, use_container_width=True, hide_index=True)
+
+    st.stop()
+
+# ── 銷售期數據 ────────────────────────────────────────────────────────────────
+
+st.header("📈 銷售期數據")
 
 with st.spinner("載入廣告數據..."):
     meta_df = fetch_meta_insights(start_str, end_str)
@@ -640,120 +783,6 @@ if not meta_df.empty:
     st.dataframe(display, use_container_width=True, hide_index=True)
 else:
     st.info("所選日期範圍內無廣告數據")
-
-# ── 素材成效（密碼鎖）──────────────────────────────────────────────────────────
-
-CREATIVE_PASSWORD = "wecan90202317"
-
-st.divider()
-st.subheader("🎨 素材成效（需密碼）")
-
-if "creative_unlocked" not in st.session_state:
-    st.session_state["creative_unlocked"] = False
-
-if not st.session_state["creative_unlocked"]:
-    with st.form("creative_pw_form", clear_on_submit=False):
-        pw = st.text_input("請輸入密碼以查看素材成效", type="password", label_visibility="collapsed", placeholder="密碼")
-        submitted = st.form_submit_button("解鎖")
-        if submitted:
-            if pw == CREATIVE_PASSWORD:
-                st.session_state["creative_unlocked"] = True
-                st.rerun()
-            else:
-                st.error("密碼錯誤")
-else:
-    col_a, col_b = st.columns([1, 6])
-    with col_a:
-        if st.button("🔒 鎖定"):
-            st.session_state["creative_unlocked"] = False
-            st.rerun()
-
-    with st.spinner("載入素材成效..."):
-        ad_df = fetch_meta_ad_insights(start_str, end_str)
-
-    if ad_df.empty:
-        st.info("所選日期範圍內無素材數據")
-    else:
-        def _safe_apply(df, col, fn):
-            if col in df.columns:
-                df[col] = df[col].apply(fn)
-
-        # 廣告組合彙總
-        st.markdown("**廣告組合（Ad Set）彙總**")
-        if "adset_name" in ad_df.columns:
-            agg_dict = {
-                "spend": ("spend", "sum"),
-                "impressions": ("impressions", "sum"),
-                "clicks": ("clicks", "sum"),
-                "purchases": ("purchases", "sum"),
-                "leads": ("leads_action", "sum"),
-                "lp_views": ("lp_views", "sum"),
-            }
-            if "reach" in ad_df.columns:
-                agg_dict["reach"] = ("reach", "sum")
-            adset_agg = ad_df.groupby(["adset_id", "adset_name"], as_index=False).agg(**agg_dict)
-
-            adset_agg["ctr"] = adset_agg.apply(
-                lambda r: (r["clicks"] / r["impressions"] * 100) if r["impressions"] > 0 else 0, axis=1
-            )
-            adset_agg["cpc"] = adset_agg.apply(
-                lambda r: r["spend"] / r["clicks"] if r["clicks"] > 0 else None, axis=1
-            )
-            adset_agg["cpa"] = adset_agg.apply(
-                lambda r: r["spend"] / (r["purchases"] if r["purchases"] > 0 else r["leads"])
-                          if (r["purchases"] > 0 or r["leads"] > 0) else None,
-                axis=1,
-            )
-
-            adset_disp = adset_agg.copy()
-            _safe_apply(adset_disp, "spend",       lambda v: f"NT$ {v:,.0f}")
-            _safe_apply(adset_disp, "impressions", lambda v: f"{int(v):,}")
-            _safe_apply(adset_disp, "clicks",      lambda v: f"{int(v):,}")
-            _safe_apply(adset_disp, "reach",       lambda v: f"{int(v):,}")
-            _safe_apply(adset_disp, "ctr",         lambda v: f"{v:.2f}%")
-            _safe_apply(adset_disp, "cpc",         lambda v: f"NT$ {v:.2f}" if pd.notna(v) else "-")
-            _safe_apply(adset_disp, "cpa",         lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
-            _safe_apply(adset_disp, "purchases",   lambda v: int(v))
-            _safe_apply(adset_disp, "leads",       lambda v: int(v))
-            _safe_apply(adset_disp, "lp_views",    lambda v: int(v))
-
-            adset_cols_map = {
-                "adset_name": "廣告組合", "spend": "花費", "impressions": "曝光",
-                "reach": "觸及", "clicks": "點擊", "ctr": "CTR", "cpc": "CPC",
-                "lp_views": "到達頁瀏覽", "leads": "名單", "purchases": "購買", "cpa": "CPA",
-            }
-            adset_show = [c for c in adset_cols_map if c in adset_disp.columns]
-            adset_disp = adset_disp[adset_show]
-            adset_disp.columns = [adset_cols_map[c] for c in adset_show]
-            st.dataframe(adset_disp, use_container_width=True, hide_index=True)
-
-        # 個別廣告（素材）明細
-        st.markdown("**個別廣告 / 素材明細**")
-        ad_disp = ad_df.copy()
-        _safe_apply(ad_disp, "ctr",         lambda v: f"{v:.2f}%")
-        _safe_apply(ad_disp, "spend",       lambda v: f"NT$ {v:,.0f}")
-        _safe_apply(ad_disp, "impressions", lambda v: f"{int(v):,}")
-        _safe_apply(ad_disp, "clicks",      lambda v: f"{int(v):,}")
-        _safe_apply(ad_disp, "reach",       lambda v: f"{int(v):,}")
-        _safe_apply(ad_disp, "frequency",   lambda v: f"{v:.2f}")
-        _safe_apply(ad_disp, "cpc",         lambda v: f"NT$ {v:.2f}" if v > 0 else "-")
-        _safe_apply(ad_disp, "cpm",         lambda v: f"NT$ {v:.0f}")
-        _safe_apply(ad_disp, "cpa",         lambda v: f"NT$ {v:,.0f}" if pd.notna(v) else "-")
-        _safe_apply(ad_disp, "purchases",   int)
-        _safe_apply(ad_disp, "leads_action", int)
-        _safe_apply(ad_disp, "lp_views",    int)
-
-        col_label_map = {
-            "adset_name": "廣告組合", "ad_name": "廣告（素材）",
-            "spend": "花費", "impressions": "曝光", "reach": "觸及",
-            "frequency": "頻率", "clicks": "點擊", "ctr": "CTR",
-            "cpc": "CPC", "cpm": "CPM", "lp_views": "到達頁瀏覽",
-            "leads_action": "名單", "purchases": "購買", "cpa": "CPA",
-        }
-        show_cols = [c for c in col_label_map.keys() if c in ad_disp.columns]
-        ad_disp = ad_disp[show_cols]
-        ad_disp.columns = [col_label_map[c] for c in show_cols]
-        st.dataframe(ad_disp, use_container_width=True, hide_index=True)
 
 # ── 前測期數據（摺疊區塊）─────────────────────────────────────────────────────
 
