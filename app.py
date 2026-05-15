@@ -23,7 +23,7 @@ def _get_secret(key: str, default: str = "") -> str:
 
 CAMPAIGN_ID    = _get_secret("CAMPAIGN_ID",    "6939598565939")
 AD_ACCOUNT_ID  = _get_secret("AD_ACCOUNT_ID",  "act_111854365566947")
-PAGE_TITLE     = _get_secret("PAGE_TITLE",     "超老闆美業行銷課前測數據儀表板")
+PAGE_TITLE     = _get_secret("PAGE_TITLE",     "超老闆美業行銷課數據儀表板")
 CAMPAIGN_LABEL = _get_secret("CAMPAIGN_LABEL", "【勿動】超老闆前測問卷_柏廷")
 
 # 前測期專用的 Meta IDs（不設則 fallback 用上面的，方便單一活動的舊報表沿用）
@@ -350,7 +350,7 @@ def detect_date_column(df: pd.DataFrame):
 # ── 主畫面 ────────────────────────────────────────────────────────────────────
 
 st.title(PAGE_TITLE)
-st.caption(f"數據每 5 分鐘自動更新 · 行銷活動：{CAMPAIGN_LABEL}")
+st.caption("數據每 5 分鐘自動更新")
 
 # 檢查 token
 if not get_access_token():
